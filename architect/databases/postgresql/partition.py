@@ -38,31 +38,6 @@ class Partition(BasePartition):
                     FOR EACH ROW EXECUTE PROCEDURE {parent_table}_insert_child();
             END IF;
             END $$;
-
-            -- Then we create a function to delete duplicate row from the master table after insert
-            CREATE OR REPLACE FUNCTION {parent_table}_delete_master()
-            RETURNS TRIGGER AS $$
-                BEGIN
-                    DELETE FROM ONLY "{parent_table}" WHERE {pk};
-                    RETURN NEW;
-                END;
-            $$ LANGUAGE plpgsql;
-
-            -- Lastly we create the after insert trigger that calls the after insert function
-            DO $$
-            BEGIN
-            IF NOT EXISTS(
-                SELECT 1
-                FROM information_schema.triggers
-                WHERE event_object_table = '{parent_table}'
-                AND trigger_name = 'after_insert_{parent_table}_trigger'
-            ) THEN
-                CREATE TRIGGER after_insert_{parent_table}_trigger
-                    AFTER INSERT ON "{parent_table}"
-                    FOR EACH ROW EXECUTE PROCEDURE {parent_table}_delete_master();
-            END IF;
-            END $$;
-
         """.format(
             pk=' AND '.join('{pk} = NEW.{pk}'.format(pk=pk) for pk in self.pks),
             parent_table=self.table,
@@ -126,30 +101,30 @@ class RangePartition(Partition):
                 startdate := date_trunc('{partition_range}', NEW.{partition_column});
                 tablename := '{parent_table}_' || to_char(NEW.{partition_column}, '{partition_pattern}');
 
-                IF NOT EXISTS(
-                    SELECT 1 FROM information_schema.tables WHERE table_name=tablename)
-                THEN
-                    BEGIN
-                        SELECT data_type INTO columntype
-                        FROM information_schema.columns
-                        WHERE table_name = '{parent_table}' AND column_name = '{partition_column}';
+                BEGIN
+                    EXECUTE 'INSERT INTO ' || tablename || ' VALUES (($1).*);' USING NEW;
+                EXCEPTION
+                    WHEN undefined_table THEN
+                        BEGIN
+                            SELECT data_type INTO columntype
+                            FROM information_schema.columns
+                            WHERE table_name = '{parent_table}' AND column_name = '{partition_column}';
 
-                        EXECUTE 'CREATE TABLE ' || tablename || ' (
-                            CHECK (
-                                {partition_column} >= ''' || startdate || '''::' || columntype || ' AND
-                                {partition_column} < ''' || (startdate + '1 {partition_range}'::interval) || '''::' || columntype || '
-                            ),
-                            LIKE "{parent_table}" INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING INDEXES
-                        ) INHERITS ("{parent_table}");';
-                    EXCEPTION WHEN duplicate_table THEN
-                        -- pass
-                    END;
-                END IF;
+                            EXECUTE 'CREATE TABLE ' || tablename || ' (
+                                CHECK (
+                                    {partition_column} >= ''' || startdate || '''::' || columntype || ' AND
+                                    {partition_column} < ''' || (startdate + '1 {partition_range}'::interval) || '''::' || columntype || '
+                                ),
+                                LIKE "{parent_table}" INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING INDEXES
+                            ) INHERITS ("{parent_table}");';
+                        EXCEPTION WHEN duplicate_table THEN
+                            -- pass
+                        END;
 
-                EXECUTE 'INSERT INTO ' || tablename || ' VALUES (($1).*);' USING NEW;
-                
+                        EXECUTE 'INSERT INTO ' || tablename || ' VALUES (($1).*);' USING NEW;
+                END;
 
-                RETURN NEW;
+                RETURN NULL;
             END;
         """.format(
             parent_table=self.table,
@@ -177,29 +152,30 @@ class RangePartition(Partition):
                 startbigint := ((NEW.{partition_column}-1)/{partition_range}) * {partition_range} + 1;
                 tablename := '{parent_table}_' || (((NEW.{partition_column}-1)/{partition_range}) + 1);
 
-                IF NOT EXISTS(
-                    SELECT 1 FROM information_schema.tables WHERE table_name=tablename)
-                THEN
-                    BEGIN
-                        SELECT data_type INTO columntype
-                        FROM information_schema.columns
-                        WHERE table_name = '{parent_table}' AND column_name = '{partition_column}';
+                BEGIN
+                    EXECUTE 'INSERT INTO ' || tablename || ' VALUES (($1).*);' USING NEW;
+                EXCEPTION
+                    WHEN undefined_table THEN
+                        BEGIN
+                            SELECT data_type INTO columntype
+                            FROM information_schema.columns
+                            WHERE table_name = '{parent_table}' AND column_name = '{partition_column}';
 
-                        EXECUTE 'CREATE TABLE ' || tablename || ' (
-                            CHECK (
-                                {partition_column} >= ''' || startbigint || '''::' || columntype || ' AND
-                                {partition_column} < ''' || (startbigint + {partition_range}) || '''::' || columntype || '
-                            ),
-                            LIKE "{parent_table}" INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING INDEXES
-                        ) INHERITS ("{parent_table}");';
-                    EXCEPTION WHEN duplicate_table THEN
-                        -- pass
-                    END;
-                END IF;
+                            EXECUTE 'CREATE TABLE ' || tablename || ' (
+                                CHECK (
+                                    {partition_column} >= ''' || startbigint || '''::' || columntype || ' AND
+                                    {partition_column} < ''' || (startbigint + {partition_range}) || '''::' || columntype || '
+                                ),
+                                LIKE "{parent_table}" INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING INDEXES
+                            ) INHERITS ("{parent_table}");';
+                        EXCEPTION WHEN duplicate_table THEN
+                            -- pass
+                        END;
 
-                EXECUTE 'INSERT INTO ' || tablename || ' VALUES (($1).*);' USING NEW;
-                
-                RETURN NEW;
+                        EXECUTE 'INSERT INTO ' || tablename || ' VALUES (($1).*);' USING NEW;
+                END;
+
+                RETURN NULL;
             END;
         """.format(
             parent_table=self.table,
@@ -226,25 +202,29 @@ class RangePartition(Partition):
             BEGIN
                 postfix := lower(substring(NEW.{partition_column} from 1 for {partition_range}));
                 tablename := '{parent_table}_' || postfix;
-                IF NOT EXISTS(
-                    SELECT 1 FROM information_schema.tables WHERE table_name=tablename)
-                THEN
-                    BEGIN
-                        SELECT data_type INTO columntype
-                        FROM information_schema.columns
-                        WHERE table_name = '{parent_table}' AND column_name = '{partition_column}';
-                        EXECUTE 'CREATE TABLE ' || tablename || ' (
-                            CHECK (
-                                lower(substring({partition_column}, 1, {partition_range})) = ''' || postfix || '''::' || columntype || '
-                            ),
-                            LIKE "{parent_table}" INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING INDEXES
-                        ) INHERITS ("{parent_table}");';
-                    EXCEPTION WHEN duplicate_table THEN
-                        -- pass
-                    END;
-                END IF;
-                EXECUTE 'INSERT INTO ' || tablename || ' VALUES (($1).*);' USING NEW;
-                RETURN NEW;
+
+                BEGIN
+                    EXECUTE 'INSERT INTO ' || tablename || ' VALUES (($1).*);' USING NEW;
+                EXCEPTION
+                    WHEN undefined_table THEN
+                        BEGIN
+                            SELECT data_type INTO columntype
+                            FROM information_schema.columns
+                            WHERE table_name = '{parent_table}' AND column_name = '{partition_column}';
+                            EXECUTE 'CREATE TABLE ' || tablename || ' (
+                                CHECK (
+                                    lower(substring({partition_column}, 1, {partition_range})) = ''' || postfix || '''::' || columntype || '
+                                ),
+                                LIKE "{parent_table}" INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING INDEXES
+                            ) INHERITS ("{parent_table}");';
+                        EXCEPTION WHEN duplicate_table THEN
+                            -- pass
+                        END;
+
+                        EXECUTE 'INSERT INTO ' || tablename || ' VALUES (($1).*);' USING NEW;
+                END;
+
+                RETURN NULL;
             END;
         """.format(
             parent_table=self.table,
